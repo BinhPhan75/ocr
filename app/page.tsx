@@ -6,10 +6,36 @@ import ImageCard from "./components/ImageCard";
 import ResultCard from "./components/ResultCard";
 import { ImageItem, OcrData } from "./types";
 
+// Resize & convert any image to JPEG < 1MB before sending to API
+function resizeToJpeg(dataUrl: string, maxPx = 1600, quality = 0.85): Promise<{ base64: string; mediaType: string }> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      let { width, height } = img;
+      if (width > maxPx || height > maxPx) {
+        const ratio = Math.min(maxPx / width, maxPx / height);
+        width = Math.round(width * ratio);
+        height = Math.round(height * ratio);
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return reject(new Error("Canvas không khả dụng"));
+      ctx.drawImage(img, 0, 0, width, height);
+      const jpeg = canvas.toDataURL("image/jpeg", quality);
+      resolve({ base64: jpeg.split(",")[1], mediaType: "image/jpeg" });
+    };
+    img.onerror = () => reject(new Error("Không đọc được ảnh"));
+    img.src = dataUrl;
+  });
+}
+
 export default function Home() {
   const [images, setImages] = useState<ImageItem[]>([]);
   const [running, setRunning] = useState(false);
   const [statusMsg, setStatusMsg] = useState("");
+  const [errorDetail, setErrorDetail] = useState("");
 
   const addFiles = useCallback((files: File[]) => {
     const newItems: ImageItem[] = [];
@@ -26,6 +52,7 @@ export default function Home() {
         loaded++;
         if (loaded === files.length) {
           setImages(prev => [...prev, ...newItems]);
+          setErrorDetail("");
         }
       };
       reader.readAsDataURL(file);
@@ -36,12 +63,13 @@ export default function Home() {
     setImages(prev => prev.filter(i => i.id !== id));
   };
 
-  const clearAll = () => { setImages([]); setStatusMsg(""); };
+  const clearAll = () => { setImages([]); setStatusMsg(""); setErrorDetail(""); };
 
   const runOcr = async () => {
     const waiting = images.filter(i => i.status === "waiting" || i.status === "error");
     if (!waiting.length) return;
     setRunning(true);
+    setErrorDetail("");
 
     for (let i = 0; i < waiting.length; i++) {
       const img = waiting[i];
@@ -49,21 +77,27 @@ export default function Home() {
       setImages(prev => prev.map(x => x.id === img.id ? { ...x, status: "loading" } : x));
 
       try {
-        const base64 = img.dataUrl.split(",")[1];
-        const mediaType = img.dataUrl.split(";")[0].split(":")[1];
+        // Resize & convert to JPEG (handles HEIC, large files, unsupported formats)
+        const { base64, mediaType } = await resizeToJpeg(img.dataUrl);
 
         const res = await fetch("/api/ocr", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ base64, mediaType }),
         });
+
         const json = await res.json();
+
         if (json.success) {
           setImages(prev => prev.map(x => x.id === img.id ? { ...x, status: "done", result: json.data } : x));
         } else {
+          const msg = json.error || "Lỗi không xác định";
+          setErrorDetail(msg);
           setImages(prev => prev.map(x => x.id === img.id ? { ...x, status: "error" } : x));
         }
-      } catch {
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        setErrorDetail(msg);
         setImages(prev => prev.map(x => x.id === img.id ? { ...x, status: "error" } : x));
       }
     }
@@ -87,6 +121,7 @@ export default function Home() {
   const doneItems = images.filter(i => i.status === "done");
   const savedCount = images.filter(i => i.saved).length;
   const hasWaiting = images.some(i => i.status === "waiting" || i.status === "error");
+  const hasError = images.some(i => i.status === "error");
 
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg)" }}>
@@ -180,16 +215,22 @@ export default function Home() {
           </div>
         )}
 
-        {/* Error notice */}
-        {images.some(i => i.status === "error") && (
+        {/* Error notice with detail */}
+        {hasError && (
           <div style={{
             marginTop: "16px", padding: "12px 16px", borderRadius: "10px",
             background: "var(--danger-dim)", border: "1px solid var(--danger)",
-            display: "flex", alignItems: "center", gap: "8px",
             fontSize: "13px", color: "#fca5a5",
           }}>
-            <AlertCircle size={15} />
-            Một số ảnh bị lỗi. Nhấn &quot;Chạy OCR&quot; để thử lại.
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: errorDetail ? "6px" : 0 }}>
+              <AlertCircle size={15} />
+              Một số ảnh bị lỗi. Nhấn &quot;Chạy OCR&quot; để thử lại.
+            </div>
+            {errorDetail && (
+              <div style={{ fontSize: "12px", color: "#fca5a5", opacity: 0.8, paddingLeft: "23px", fontFamily: "monospace" }}>
+                Chi tiết: {errorDetail}
+              </div>
+            )}
           </div>
         )}
 
